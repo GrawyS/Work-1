@@ -95,6 +95,41 @@ class VFS:
 
         return node
 
+    def create_file(self, path):
+        if path is None or path == "":
+            return ("error", "invalid path")
+
+        path = path.rstrip("/")
+        if path == "":
+            path = "/"
+
+        if "/" in path:
+            parent_path, name = path.rsplit("/", 1)
+            if parent_path == "" or parent_path == "/":
+                parent = self.root
+            else:
+                parent = self.resolve(parent_path)
+        else:
+            parent = self.cwd
+            name = path
+
+        if parent is None:
+            return ("error", f"cannot create '{path}': No such file or directory")
+        if not parent.is_dir:
+            return ("error", f"cannot create '{path}': Not a directory")
+        if name == "":
+            return ("error", f"cannot create '{path}': Invalid name")
+
+        existing = parent.children.get(name)
+        if existing is not None:
+            if existing.is_dir:
+                return ("isdir", existing)
+            return ("exists", existing)
+
+        node = Node(name=name, is_dir=False, parent=parent, content="")
+        parent.children[name] = node
+        return ("ok", node)
+
     def pwd(self):
         parts = []
         node = self.cwd

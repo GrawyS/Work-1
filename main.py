@@ -325,6 +325,19 @@ def build_gui(cfg, vfs):
             if show_c: parts.append(f"{n_bytes:>4}")
             out(f"{' '.join(parts)} {target}")
 
+    def cmd_touch(args):
+        if vfs is None:
+            out("touch: VFS не загружена")
+            return
+        if not args:
+            out("touch: missing file operand")
+            return
+
+        for target in args:
+            status, obj = vfs.create_file(target)
+            if status == "error":
+                out(f"touch: {obj}")
+
     def cmd_exit(args):
         out("exit: exit")
         root.destroy()
@@ -351,6 +364,7 @@ def build_gui(cfg, vfs):
         "cd":        cmd_cd,
         "tail":      cmd_tail,
         "wc":        cmd_wc,
+        "touch":     cmd_touch,
         "exit":      cmd_exit,
         "conf-dump": cmd_conf_dump,
     }
@@ -396,7 +410,7 @@ def build_gui(cfg, vfs):
     entry.bind("<Return>", on_enter)
     entry.focus_set()
 
-    out("Shell Emulator — этап 4")
+    out("Shell Emulator — этап 5")
     out(f"vfs_path     = {cfg['vfs_path']}  (источник: {cfg['vfs_path_src']})")
     out(f"start_script = {cfg['start_script']}  (источник: {cfg['start_script_src']})")
     if vfs is not None:
