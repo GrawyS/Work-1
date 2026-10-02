@@ -3,6 +3,8 @@ import argparse
 import configparser
 import os
 
+from vfs import VFS, VfsError
+
 
 def parse_args():
     p = argparse.ArgumentParser(prog="vfs-emulator")
@@ -64,9 +66,9 @@ def dump_config(cfg):
         print(f"  {k} = {v}")
 
 
-def build_gui(cfg):
+def build_gui(cfg, vfs):
     root = tk.Tk()
-    root.title("VFS: shell emulator")
+    root.title(f"VFS: {vfs.name if vfs else 'не загружена'}")
     root.geometry("800x500")
 
     output = tk.Text(
@@ -121,15 +123,47 @@ def build_gui(cfg):
 
     def cmd_ls(args):
         flags, operands = parse_flags(args)
-        out(f"ls: flags={sorted(flags)}, paths={operands}")
+        if vfs is None:
+            out("ls: VFS не загружена")
+            return
+        target = operands[0] if operands else "."
+        node = vfs.resolve(target)
+        if node is None:
+            out(f"ls: cannot access '{target}': No such file or directory")
+            return
+        if not node.is_dir:
+            out(node.name)
+            return
+        for name in sorted(node.children.keys()):
+            out(name)
 
     def cmd_cd(args):
+        if vfs is None:
+            out("cd: VFS не загружена")
+            return
         if not args:
-            out("cd: go to home directory")
-        elif len(args) > 1:
+            vfs.prev_cwd, vfs.cwd = vfs.cwd, vfs.home
+            out(vfs.pwd())
+            return
+        if len(args) > 1:
             out(f"cd: too many arguments: {args}")
-        else:
-            out(f"cd: go to '{args[0]}'")
+            return
+        target = args[0]
+
+        if target == "-":
+            vfs.cwd, vfs.prev_cwd = vfs.prev_cwd, vfs.cwd
+            out(vfs.pwd())
+            return
+
+        node = vfs.resolve(target)
+        if node is None:
+            out(f"cd: no such file or directory: {target}")
+            return
+        if not node.is_dir:
+            out(f"cd: not a directory: {target}")
+            return
+        vfs.prev_cwd, vfs.cwd = vfs.cwd, node
+        out(vfs.pwd())
 
     def cmd_exit(args):
         out("exit: exit")
@@ -145,6 +179,12 @@ def build_gui(cfg):
                 out(f"  {k} = {v}  (источник: {src})")
             else:
                 out(f"  {k} = {v}")
+        if vfs is not None:
+            out(f"  vfs_loaded = True")
+            out(f"  vfs_name   = {vfs.name}")
+            out(f"  vfs_pwd    = {vfs.pwd()}")
+        else:
+            out(f"  vfs_loaded = False")
 
     COMMANDS = {
         "ls":        cmd_ls,
@@ -194,9 +234,13 @@ def build_gui(cfg):
     entry.bind("<Return>", on_enter)
     entry.focus_set()
 
-    out("Shell Emulator — этап 2")
+    out("Shell Emulator — этап 3")
     out(f"vfs_path     = {cfg['vfs_path']}  (источник: {cfg['vfs_path_src']})")
     out(f"start_script = {cfg['start_script']}  (источник: {cfg['start_script_src']})")
+    if vfs is not None:
+        out(f"VFS загружена: {vfs.name}")
+    else:
+        out("VFS не загружена")
     out("")
 
     if cfg["start_script"]:
@@ -210,9 +254,24 @@ def main():
     ini  = load_ini(args.config)
     cfg  = merge_config(ini, args)
 
+    if not cfg["vfs_path"]:
+        cfg["vfs_path"] = "vfs_samples"
+        cfg["vfs_path_src"] = "default"
+
     dump_config(cfg)
 
-    root = build_gui(cfg)
+    vfs = None
+    if cfg["vfs_path"]:
+        try:
+            vfs = VFS(cfg["vfs_path"])
+            print(f"[DEBUG] VFS загружена: {vfs.name} (корень: {cfg['vfs_path']})")
+        except VfsError as e:
+            print(f"[ERROR] Ошибка загрузки VFS: {e}")
+            vfs = None
+    else:
+        print("[WARN] Путь к VFS не задан — работаем без ФС")
+
+    root = build_gui(cfg, vfs)
     root.mainloop()
 
 
