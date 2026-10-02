@@ -66,6 +66,46 @@ def dump_config(cfg):
         print(f"  {k} = {v}")
 
 
+def tokenize(line):
+    tokens, cur, quote = [], [], None
+    for ch in line:
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                cur.append(ch)
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch.isspace():
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        tokens.append("".join(cur))
+    return tokens
+
+
+def parse_flags(args):
+    flags, operands = set(), []
+    for a in args:
+        if a.startswith("-") and len(a) > 1 and not a[1].isdigit():
+            flags.update(a[1:])
+        else:
+            operands.append(a)
+    return flags, operands
+
+
+def human_size(n):
+    n = float(n)
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}T"
+
+
 def build_gui(cfg, vfs):
     root = tk.Tk()
     root.title(f"VFS: {vfs.name if vfs else 'не загружена'}")
@@ -92,50 +132,85 @@ def build_gui(cfg, vfs):
         output.see(tk.END)
         output.config(state=tk.DISABLED)
 
-    def tokenize(line):
-        tokens, cur, quote = [], [], None
-        for ch in line:
-            if quote:
-                if ch == quote:
-                    quote = None
-                else:
-                    cur.append(ch)
-            elif ch in ("'", '"'):
-                quote = ch
-            elif ch.isspace():
-                if cur:
-                    tokens.append("".join(cur))
-                    cur = []
-            else:
-                cur.append(ch)
-        if cur:
-            tokens.append("".join(cur))
-        return tokens
+    def _collect_entries(node, show_all):
+        names = list(node.children.keys())
+        if show_all:
+            return [".", ".."] + names
+        return [n for n in names if not n.startswith(".")]
 
-    def parse_flags(args):
-        flags, operands = set(), []
-        for a in args:
-            if a.startswith("-") and len(a) > 1:
-                flags.update(a[1:])
+    def _sort_entries(node, names, flags):
+        if 'S' in flags:
+            def key(n):
+                if n in (".", ".."):
+                    return -1
+                child = node.children.get(n)
+                return child.size if child else 0
+            return sorted(names, key=key, reverse=True)
+        return sorted(names)
+
+    def _ls_dir(node, flags):
+        names = _collect_entries(node, show_all=('a' in flags))
+        names = _sort_entries(node, names, flags)
+
+        for name in names:
+            if name == ".":
+                child = node
+            elif name == "..":
+                child = node.parent or node
             else:
-                operands.append(a)
-        return flags, operands
+                child = node.children.get(name)
+
+            if 'l' in flags and child is not None:
+                size = child.size
+                size_str = human_size(size) if 'h' in flags else str(size)
+                out(f"{child.mode_str()}  {size_str:>6}  {name}")
+            else:
+                out(name)
+
+    def _ls_recursive(node, flags, base):
+        for name in sorted(node.children.keys()):
+            if name.startswith(".") and 'a' not in flags:
+                continue
+            child = node.children[name]
+            if child.is_dir:
+                subpath = f"{base.rstrip('/')}/{name}"
+                out()
+                out(f"{subpath}:")
+                _ls_dir(child, flags)
+                _ls_recursive(child, flags, base=subpath)
 
     def cmd_ls(args):
         flags, operands = parse_flags(args)
         if vfs is None:
             out("ls: VFS не загружена")
             return
-        target = operands[0] if operands else "."
-        node = vfs.resolve(target)
-        if node is None:
-            out(f"ls: cannot access '{target}': No such file or directory")
-            return
-        if not node.is_dir:
-            out(node.name)
-            return
-        for name in sorted(node.children.keys()):
-            out(name)
+
+        targets = operands if operands else ["."]
+        multiple = len(targets) > 1
+
+        for idx, target in enumerate(targets):
+            node = vfs.resolve(target)
+            if node is None:
+                out(f"ls: cannot access '{target}': No such file or directory")
+                continue
+
+            if multiple and idx > 0:
+                out()
+
+            if not node.is_dir:
+                if 'l' in flags:
+                    size_str = human_size(node.size) if 'h' in flags else str(node.size)
+                    out(f"{node.mode_str()}  {size_str:>6}  {node.name}")
+                else:
+                    out(node.name)
+                continue
+
+            if multiple:
+                out(f"{target}:")
+
+            _ls_dir(node, flags)
+            if 'R' in flags:
+                _ls_recursive(node, flags, base=target)
 
     def cmd_cd(args):
         if vfs is None:
@@ -165,6 +240,91 @@ def build_gui(cfg, vfs):
         vfs.prev_cwd, vfs.cwd = vfs.cwd, node
         out(vfs.pwd())
 
+    def cmd_tail(args):
+        if vfs is None:
+            out("tail: VFS не загружена")
+            return
+
+        n = 10
+        operands = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-n":
+                if i + 1 >= len(args):
+                    out("tail: option requires an argument -- 'n'")
+                    return
+                try:
+                    n = int(args[i + 1])
+                except ValueError:
+                    out(f"tail: invalid number of lines: '{args[i + 1]}'")
+                    return
+                i += 2
+                continue
+            if a.startswith("-n") and len(a) > 2:
+                try:
+                    n = int(a[2:])
+                except ValueError:
+                    out(f"tail: invalid number of lines: '{a[2:]}'")
+                    return
+                i += 1
+                continue
+            operands.append(a)
+            i += 1
+
+        if not operands:
+            out("tail: missing file operand")
+            return
+
+        target = operands[0]
+        node = vfs.resolve(target)
+        if node is None:
+            out(f"tail: cannot open '{target}' for reading: No such file or directory")
+            return
+        if node.is_dir:
+            out(f"tail: error reading '{target}': Is a directory")
+            return
+
+        lines = node.content.splitlines()
+        for line in (lines[-n:] if n > 0 else []):
+            out(line)
+
+    def cmd_wc(args):
+        if vfs is None:
+            out("wc: VFS не загружена")
+            return
+
+        flags, operands = parse_flags(args)
+        show_l = 'l' in flags
+        show_w = 'w' in flags
+        show_c = 'c' in flags
+        if not (show_l or show_w or show_c):
+            show_l = show_w = show_c = True
+
+        if not operands:
+            out("wc: missing file operand")
+            return
+
+        for target in operands:
+            node = vfs.resolve(target)
+            if node is None:
+                out(f"wc: {target}: No such file or directory")
+                continue
+            if node.is_dir:
+                out(f"wc: {target}: Is a directory")
+                continue
+
+            content = node.content
+            n_lines = len(content.splitlines())
+            n_words = len(content.split())
+            n_bytes = node.size
+
+            parts = []
+            if show_l: parts.append(f"{n_lines:>4}")
+            if show_w: parts.append(f"{n_words:>4}")
+            if show_c: parts.append(f"{n_bytes:>4}")
+            out(f"{' '.join(parts)} {target}")
+
     def cmd_exit(args):
         out("exit: exit")
         root.destroy()
@@ -189,6 +349,8 @@ def build_gui(cfg, vfs):
     COMMANDS = {
         "ls":        cmd_ls,
         "cd":        cmd_cd,
+        "tail":      cmd_tail,
+        "wc":        cmd_wc,
         "exit":      cmd_exit,
         "conf-dump": cmd_conf_dump,
     }
@@ -234,7 +396,7 @@ def build_gui(cfg, vfs):
     entry.bind("<Return>", on_enter)
     entry.focus_set()
 
-    out("Shell Emulator — этап 3")
+    out("Shell Emulator — этап 4")
     out(f"vfs_path     = {cfg['vfs_path']}  (источник: {cfg['vfs_path_src']})")
     out(f"start_script = {cfg['start_script']}  (источник: {cfg['start_script_src']})")
     if vfs is not None:

@@ -16,6 +16,9 @@ class Node:
         self.content = content if not is_dir else ""
         self.size = 0 if is_dir else len(content.encode("utf-8"))
 
+    def mode_str(self):
+        return "drwxr-xr-x" if self.is_dir else "-rw-r--r--"
+
     def __repr__(self):
         kind = "dir" if self.is_dir else "file"
         return f"<Node {kind} {self.name}>"
