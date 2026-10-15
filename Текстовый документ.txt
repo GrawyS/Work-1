@@ -1,0 +1,4 @@
+@echo off
+cd /d "%~dp0"
+python main.py --vfs vfs_samples --script scripts\startup.txt
+pause

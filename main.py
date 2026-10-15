@@ -2,6 +2,7 @@ import tkinter as tk
 import argparse
 import configparser
 import os
+import re
 
 from vfs import VFS, VfsError
 
@@ -66,6 +67,20 @@ def dump_config(cfg):
         print(f"  {k} = {v}")
 
 
+def expand_vars(token):
+    """Раскрыть $VAR и ${VAR} из переменных окружения реальной ОС.
+
+    На Windows переменная HOME обычно отсутствует — используем USERPROFILE.
+    """
+    def repl(m):
+        name = m.group(1)
+        if name in os.environ:
+            return os.environ.get(name, '')
+        if name == "HOME":
+            return os.environ.get("USERPROFILE", "")
+        return ""
+
+
 def tokenize(line):
     tokens, cur, quote = [], [], None
     for ch in line:
@@ -84,7 +99,7 @@ def tokenize(line):
             cur.append(ch)
     if cur:
         tokens.append("".join(cur))
-    return tokens
+    return [expand_vars(t) for t in tokens]
 
 
 def parse_flags(args):
@@ -179,6 +194,33 @@ def build_gui(cfg, vfs):
                 _ls_dir(child, flags)
                 _ls_recursive(child, flags, base=subpath)
 
+    def _ls_real(path, flags, multiple, idx):
+        if multiple and idx > 0:
+            out()
+        if multiple:
+            out(f"{path}:")
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError as e:
+            out(f"ls: cannot open directory '{path}': {e}")
+            return
+        for name in entries:
+            if 'a' not in flags and name.startswith("."):
+                continue
+            if 'l' in flags:
+                full = os.path.join(path, name)
+                try:
+                    size = os.path.getsize(full)
+                    is_dir = os.path.isdir(full)
+                except OSError:
+                    size = 0
+                    is_dir = False
+                mode = "drwxr-xr-x" if is_dir else "-rw-r--r--"
+                size_str = human_size(size) if 'h' in flags else str(size)
+                out(f"{mode}  {size_str:>6}  {name}")
+            else:
+                out(name)
+
     def cmd_ls(args):
         flags, operands = parse_flags(args)
         if vfs is None:
@@ -190,27 +232,34 @@ def build_gui(cfg, vfs):
 
         for idx, target in enumerate(targets):
             node = vfs.resolve(target)
-            if node is None:
-                out(f"ls: cannot access '{target}': No such file or directory")
+
+            if node is not None:
+                if multiple and idx > 0:
+                    out()
+                if not node.is_dir:
+                    if 'l' in flags:
+                        size_str = human_size(node.size) if 'h' in flags else str(node.size)
+                        out(f"{node.mode_str()}  {size_str:>6}  {node.name}")
+                    else:
+                        out(node.name)
+                    continue
+                if multiple:
+                    out(f"{target}:")
+                _ls_dir(node, flags)
+                if 'R' in flags:
+                    _ls_recursive(node, flags, base=target)
                 continue
 
-            if multiple and idx > 0:
-                out()
-
-            if not node.is_dir:
-                if 'l' in flags:
-                    size_str = human_size(node.size) if 'h' in flags else str(node.size)
-                    out(f"{node.mode_str()}  {size_str:>6}  {node.name}")
-                else:
-                    out(node.name)
+            if os.path.isdir(target):
+                _ls_real(target, flags, multiple, idx)
+                continue
+            if os.path.isfile(target):
+                if multiple and idx > 0:
+                    out()
+                out(target)
                 continue
 
-            if multiple:
-                out(f"{target}:")
-
-            _ls_dir(node, flags)
-            if 'R' in flags:
-                _ls_recursive(node, flags, base=target)
+            out(f"ls: cannot access '{target}': No such file or directory")
 
     def cmd_cd(args):
         if vfs is None:
@@ -232,6 +281,9 @@ def build_gui(cfg, vfs):
 
         node = vfs.resolve(target)
         if node is None:
+            if os.path.isdir(target):
+                out(f"(real) {os.path.abspath(target)}")
+                return
             out(f"cd: no such file or directory: {target}")
             return
         if not node.is_dir:
@@ -277,17 +329,33 @@ def build_gui(cfg, vfs):
             return
 
         target = operands[0]
+
         node = vfs.resolve(target)
-        if node is None:
-            out(f"tail: cannot open '{target}' for reading: No such file or directory")
+        if node is not None:
+            if node.is_dir:
+                out(f"tail: error reading '{target}': Is a directory")
+                return
+            lines = node.content.splitlines()
+            for line in (lines[-n:] if n > 0 else []):
+                out(line)
             return
-        if node.is_dir:
+
+        if os.path.isfile(target):
+            try:
+                with open(target, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.read().splitlines()
+            except OSError as e:
+                out(f"tail: cannot open '{target}': {e}")
+                return
+            for line in (lines[-n:] if n > 0 else []):
+                out(line)
+            return
+
+        if os.path.isdir(target):
             out(f"tail: error reading '{target}': Is a directory")
             return
 
-        lines = node.content.splitlines()
-        for line in (lines[-n:] if n > 0 else []):
-            out(line)
+        out(f"tail: cannot open '{target}' for reading: No such file or directory")
 
     def cmd_wc(args):
         if vfs is None:
@@ -307,17 +375,29 @@ def build_gui(cfg, vfs):
 
         for target in operands:
             node = vfs.resolve(target)
-            if node is None:
-                out(f"wc: {target}: No such file or directory")
-                continue
-            if node.is_dir:
-                out(f"wc: {target}: Is a directory")
-                continue
+            if node is not None:
+                if node.is_dir:
+                    out(f"wc: {target}: Is a directory")
+                    continue
+                content = node.content
+            else:
+                if os.path.isfile(target):
+                    try:
+                        with open(target, "r", encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+                    except OSError as e:
+                        out(f"wc: {target}: {e}")
+                        continue
+                elif os.path.isdir(target):
+                    out(f"wc: {target}: Is a directory")
+                    continue
+                else:
+                    out(f"wc: {target}: No such file or directory")
+                    continue
 
-            content = node.content
             n_lines = len(content.splitlines())
             n_words = len(content.split())
-            n_bytes = node.size
+            n_bytes = len(content.encode("utf-8"))
 
             parts = []
             if show_l: parts.append(f"{n_lines:>4}")
@@ -337,6 +417,9 @@ def build_gui(cfg, vfs):
             status, obj = vfs.create_file(target)
             if status == "error":
                 out(f"touch: {obj}")
+
+    def cmd_echo(args):
+        out(" ".join(args))
 
     def cmd_exit(args):
         out("exit: exit")
@@ -365,6 +448,7 @@ def build_gui(cfg, vfs):
         "tail":      cmd_tail,
         "wc":        cmd_wc,
         "touch":     cmd_touch,
+        "echo":      cmd_echo,
         "exit":      cmd_exit,
         "conf-dump": cmd_conf_dump,
     }
